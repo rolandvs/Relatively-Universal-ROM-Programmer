@@ -40,6 +40,7 @@ const int ANALOG_PIN = A2; // Analog pin connected to VEP
 #define VPE_ENABLE    0b00000100
 #define P1_VPP_ENABLE 0b00001000
 #define A17_E         0b00010000
+#define VCC28PIN      0b00010000
 #define A18_E         0b00100000
 #define RW            0b01000000
 #define REG_DISABLE   0b10000000
@@ -49,6 +50,7 @@ byte pattern = 0xAA;
 uint16_t cAddr = 0;
 byte buffer[128]; 
 #define BUFFERSIZE 128
+byte rompincount = 28; 
 
 uint32_t baudrate = 19200;
 
@@ -79,7 +81,7 @@ delayMicroseconds(1);
 
     // Initialize the OLED display
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    latchControlByte(0x40);
+  //  latchControlByte(0x40);
     for(;;);
   }
   
@@ -91,8 +93,9 @@ delayMicroseconds(1);
   display.setTextColor(SSD1306_WHITE);
   display.println("Boot complete.");
   display.display();
-
-  latchControlByte(0x10); //Can't latch things when serial is enabled
+  readAddress(0); //Init address latch
+  latchControlByte(VCC28PIN|P1_VPP_ENABLE); //Can't latch things when serial is enabled
+  delay(1); //Avoid serial framing error
   Serial.begin(baudrate);
 
 }
@@ -115,7 +118,10 @@ void loop() {
         cAddr |= cAddrL;
         romsize = (static_cast<uint32_t>(Serial.read()) << 8); //Reads stoppage a.k.a. the high byte of ROM size
         if (romsize == 0) romsize = 65536; //Need a fix to support A17+
+        rompincount = Serial.read();
         Serial.end();
+        if (rompincount == 24) latchAddress(0x2000); //Enable VCC
+        if (rompincount == 28) latchControlByte(VCC28PIN);
         display.clearDisplay();
         display.print(F("Sending ROM via serial..."));
         display.print("Blocksize: ");
@@ -127,6 +133,7 @@ void loop() {
           buffer[addr] = readAddress(cAddr);
           cAddr++;
         }
+        delayMicroseconds(500); //Avoid framing errors - value can be tuned depending on baudrate
         Serial.begin(baudrate);
         Serial.write(0xAA);
         for (uint16_t addr = 0; addr < currentCommand.blockSize; addr++) {
@@ -150,18 +157,29 @@ void loop() {
       }
 
       if (currentCommand.command == 0x02) { 
+        byte controlbyte = 0;
         //Burn ROM from serial
         currentCommand.blockSize = Serial.read();
         currentCommand.stopPage = Serial.read();
+        rompincount = Serial.read();
         Serial.end();
+        if (rompincount == 24) {
+        latchAddress(0x2000); //Enable VCC
+        controlbyte = (REG_DISABLE | P1_VPP_ENABLE); //Enabling P1_VPP_Enable for JP4 (Leave OPEN for 28 pin ROMs!!))
+        PORTB &= ~(ROM_CE); //Make sure chip is enabled
+        }
+        if (rompincount == 28) {
+          controlbyte = (VPE_TO_VPP | REG_DISABLE | VPE_ENABLE | VCC28PIN);
+        }
+
         display.clearDisplay();
         display.println(F("Burning ROM from serial..."));
         display.print("Blocksize: ");
         display.print(currentCommand.blockSize);
         display.display();
-        latchControlByte(VPE_TO_VPP | REG_DISABLE);
+        latchControlByte((VPE_TO_VPP | REG_DISABLE | VCC28PIN ) & controlbyte);
         delay(50); //Settle before enabling
-        latchControlByte(VPE_TO_VPP | REG_DISABLE | VPE_ENABLE );
+        latchControlByte(controlbyte); //Burn ROM config
         delay(200);
         Serial.begin(baudrate);
         while (1) { 
@@ -175,14 +193,14 @@ void loop() {
           if (bytesRead == currentCommand.blockSize) {
             // Process the buffer data
            Serial.end();
-           delay(1);
+           delayMicroseconds(20);
            writefromBuffer(cAddr, currentCommand.blockSize);
           } else {
             display.println("Bad block");
             break;
           }
+          delayMicroseconds(20);
           Serial.begin(baudrate);
-          delay(1);
           }
       }
     } 
@@ -237,9 +255,17 @@ void displayVEP() {
 //For single byte writes 
 void writeByte(uint16_t address, byte data) {
 latchAddress(address);
-latchControlByte(VPE_TO_VPP | REG_DISABLE);
+byte controlbyte = 0;
+        if (rompincount == 24) {
+        controlbyte = (REG_DISABLE | P1_VPP_ENABLE); //Enabling P1_VPP_Enable for JP4 (Leave OPEN for 28 pin ROMs!!))
+        }
+        if (rompincount == 28) {
+          controlbyte = (VPE_TO_VPP | REG_DISABLE | VPE_ENABLE | VCC28PIN);
+        }
+
+latchControlByte((VPE_TO_VPP | REG_DISABLE) & controlbyte);
 delay(50); //Settle before enabling
-latchControlByte(VPE_TO_VPP | REG_DISABLE | VPE_ENABLE );
+latchControlByte(controlbyte );
 //delay(255); //What works on 65uino
 DDRD = 0xFF; //Output
 PORTD = data; 
@@ -254,9 +280,16 @@ void writefromBuffer(uint16_t addr, uint16_t len) {
   for (int i = 0; i < len; i++){
     latchAddress(addr);
     PORTD = buffer[i];
+    if (rompincount = 28) {
     PORTB &= ~(ROM_CE);
     delayMicroseconds(101);
-    PORTB |= ROM_CE;
+    PORTB |= ROM_CE; 
+    }
+    if (rompincount = 24) {
+    PORTB |= ROM_CE; //High pulse for 2716/TMS2516
+    delay(50);
+    PORTB &= ~(ROM_CE);
+    }
     addr++;
   } 
   cAddr = addr;
@@ -300,13 +333,16 @@ byte readAddress(uint16_t addr) {
   latchAddress(addr);
   DDRD = 0; //PORTD as input
   PORTB &= ~(ROM_OE | ROM_CE);
-  delayMicroseconds(5); //Let it settle a bit. Maybe a NOP would do. 
+  delayMicroseconds(20); //Let it settle a bit. Maybe a NOP would do. 
   byte val = PIND;
-  PORTB |= (ROM_OE | ROM_CE);
+  PORTB |= (ROM_OE); //Leave CE low
   return val;
 }
 
 void latchControlByte(byte controlByte) {
+  //Enable VCC for 28 pin ROMs
+  if (rompincount == 28) controlByte |= VCC28PIN;
+
   // Set control byte using direct port manipulation
   DDRD  = 0xFF ; // All output
   PORTD = controlByte;
@@ -318,8 +354,8 @@ void latchControlByte(byte controlByte) {
 }
 
 // Global variables to store the previous LSB and MSB values
-byte prevLSB = 0;
-byte prevMSB = 0;
+byte prevLSB = 1;
+byte prevMSB = 1;
 
 void latchAddress(uint16_t address) {
   // Extract the least significant byte
@@ -341,9 +377,12 @@ void latchAddress(uint16_t address) {
 
   // Check if MSB has changed
   if (msb != prevMSB) {
+    if (rompincount == 24) {
+    msb |= 0b00100000; //Enable VCC on "A13"
+    }
     // Write MSB to PORTD
     PORTD = msb;
-    // Set CTRL_LE pin HIGH to latch higher 8 bits of address (MSB)
+    // Set RMSBLE pin HIGH to latch higher 8 bits of address (MSB)
     PORTB |= RMSBLE;
     // Set RMSBLE pin LOW to unlatch higher 8 bits of address (MSB)
     PORTB &= ~RMSBLE;

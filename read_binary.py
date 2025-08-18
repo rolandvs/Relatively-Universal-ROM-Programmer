@@ -2,7 +2,7 @@ import sys
 import time
 import serial
 
-def get_file(serial_port, baud_rate, file_path, total_bytes, block_size):
+def get_file(serial_port, baud_rate, file_path, total_bytes, block_size, rom_pincount):
     try:
         # Open serial port
         ser = serial.Serial(serial_port, baud_rate)
@@ -16,7 +16,7 @@ def get_file(serial_port, baud_rate, file_path, total_bytes, block_size):
         ser.write(b'\x00') #MSB
         stoppage = (total_bytes >> 8) & 0xFF 
         ser.write(bytes([stoppage])) # Stoppage
-
+        ser.write(bytes([rom_pincount])) # ROM pin count
         start_time = time.time()
 
         # Initialize a buffer to store received data
@@ -60,8 +60,8 @@ def get_file(serial_port, baud_rate, file_path, total_bytes, block_size):
 
 if __name__ == "__main__":
     # Check if correct number of command line arguments is provided
-    if len(sys.argv) != 6:
-        print("Usage: python read_binary.py <serial_port> <baud_rate> <file_path> <total_bytes> <block_size>")
+    if len(sys.argv) != 7:
+        print("Usage: python read_binary.py <serial_port> <baud_rate> <file_path> <total_bytes> <block_size> <rom pincount>")
         sys.exit(1)
 
     # Extract command line arguments
@@ -70,6 +70,7 @@ if __name__ == "__main__":
     file_path = sys.argv[3]
     total_bytes = int(sys.argv[4])
     block_size = int(sys.argv[5])
+    rom_pincount = int(sys.argv[6])  # Convert string to int
 
     # Call the function to send the file
-    get_file(serial_port, baud_rate, file_path, total_bytes, block_size)
+    get_file(serial_port, baud_rate, file_path, total_bytes, block_size, rom_pincount)
